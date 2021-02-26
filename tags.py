@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 #
 # Copyright © 2017 Hasan Yavuz Özderya
+# Copyright © 2021 Joe Hillenbrand
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,12 +17,20 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+# TODO Right click menu
+    # TODO delete tag
+    # TODO rename
+# TODO multiple files
+# TODO Filter box https://gist.github.com/koMah/8059747
+# TODO Prompt to create database
+
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk
 
 import sys, os, enum
 import subprocess as sp
+from operator import itemgetter
 
 class Tmsu:
     def __init__(self, tmsu):
@@ -30,79 +39,76 @@ class Tmsu:
     def info(self):
         try:
             r = self._cmd('info')
+            print(r)
+            lines = r.splitlines()
+            def psplit(l):
+                return map(lambda x: x.strip(), l.split(':'))
+            d = dict(map(psplit, lines))
+
+            return {'root': d['Root path'],
+                    'size': d['Size'],
+                    'database':d['Database']}
         except sp.CalledProcessError as e:
             if e.returncode == 1: # database doesn't exist
                 return None
-        lines = r.splitlines()
-        def psplit(l): return map(lambda x: x.strip(), l.split(':'))
-        d = dict(map(psplit, lines))
 
-        return {'root': d['Root path'],
-                'size': d['Size'],
-                'database':d['Database']}
-
-    def tags(self, fileName=None):
-        """Returns a list of tags. If fileName is provided, list item is a tuple of
-        (tagname, value) pair."""
+    def tags(self, fileName):
+        # Note: tmsu behaves differently for 'tags' command when used
+        # interactively and called from scripts. That's why we add '-n'.
+        allTags = self._cmd('tags', '-1').splitlines()
+        res = {name: None for name in allTags}
         if fileName:
-            # Note: tmsu behaves differently for 'tags' command when used
-            # interactively and called from scripts. That's why we add '-n'.
-            r = self._cmd('tags -n "{}"'.format(fileName))
-            tag_value = []
-            for tag in r.split(':')[1].split():
+            tags = self._cmd('tags', '-1', '--name=never', fileName).splitlines()
+            for tag in tags:
                 tv = tag.split("=")
                 if len(tv) > 1:
-                    tag_value.append((tv[0], tv[1]))
+                    res[tv[0]]=tv[1]
                 else:
-                    tag_value.append((tv[0], ""))
-            return tag_value
-        else:
-            return self._cmd('tags').splitlines()
+                    res[tv[0]]=True
+        return res
 
     def tag(self, fileName, tagName, value=None):
         try:
-            self._cmd('tag "{}" {}{}'.format(fileName, tagName,
-                                             "="+value if value else ""))
+            self._cmd('tag', fileName, tagName+("="+value if value else ""))
             return True
-        except sp.CalledProcessError as e:
+        except sp.CalledProcessError:
             print("Failed to tag file.")
             return False
 
     def untag(self, fileName, tagName, value=None):
         try:
-            self._cmd('untag "{}" {}{}'.format(fileName, tagName,
-                                               "="+value if value else ""))
+            self._cmd('untag', fileName, tagName+("="+value if value else ""))
             return True
-        except sp.CalledProcessError as e:
+        except sp.CalledProcessError:
             print("Failed to untag file.")
             return False
 
     def rename(self, tagName, newName):
         try:
-            self._cmd('rename {} {}'.format(tagName, newName))
+            self._cmd('rename', tagName, newName)
             return True
-        except sp.CalledProcessError as e:
+        except sp.CalledProcessError:
             print("Failed to rename tag.")
             return False
 
     def values(self, tagName=None):
         try:
-            r = self._cmd('values {}'.format(tagName if tagName else ""))
+            r = self._cmd('values', tagName or "")
             return r.split()
-        except sp.CalledProcessError as e:
+        except sp.CalledProcessError:
             print("Failed to get value list.")
             return False
 
     def delete(self, tagName):
         try:
-            self._cmd('delete {}'.format(tagName))
+            self._cmd('delete', {})
             return True
-        except sp.CalledProcessError as e:
+        except sp.CalledProcessError:
             print("Failed to delete tag: {}".format(tagName))
             return False
 
-    def _cmd(self, cmd):
-        return sp.check_output('tmsu ' + cmd, shell=True).decode('utf-8')
+    def _cmd(self, *cmd):
+        return sp.check_output(['tmsu', *cmd]).decode('utf-8')
 
     @staticmethod
     def findTmsu():
@@ -131,7 +137,7 @@ class MyWindow(Gtk.Window):
         self.vbox = Gtk.Box(parent = self,
                             orientation = Gtk.Orientation.VERTICAL)
         self.store = Gtk.ListStore(bool, str, str)
-        self.list_widget = Gtk.TreeView(self.store)
+        self.list_widget = Gtk.TreeView(model=self.store)
         self.vbox.pack_start(self.list_widget, True, True, 0)
 
         # 'tagged' checkbox column
@@ -351,15 +357,19 @@ class MyWindow(Gtk.Window):
 
     def loadTags(self):
         """Loads tags for the first time."""
-        allTags = self.tmsu.tags()
-        fileTags = self.tmsu.tags(self.fileName)
-        fileTagNames=[]
-        for tag in fileTags:
-            self.store.append([True, tag[0], tag[1]])
-            fileTagNames.append(tag[0])
-        for tag in allTags:
-            if not tag in fileTagNames:
-                self.store.append([False, tag, ""])
+        tags = self.tmsu.tags(self.fileName)
+        rows = []
+        for name, value in tags.items():
+            checked = (value or False) and True
+            rows.append([checked, name, value if isinstance(value, str) else "" ])
+
+        rows.sort(key=itemgetter(2))
+        rows.sort(key=itemgetter(1))
+        rows.sort(key=itemgetter(0), reverse=True)
+
+        for row in rows:
+            print(row)
+            self.store.append(row)
 
     def deleteTag(self, tagName):
         """Deletes a tag and shows error if fails."""
@@ -392,8 +402,8 @@ if __name__ == "__main__":
 
     if err:
         dialog = Gtk.MessageDialog(
-            None, 0, Gtk.MessageType.INFO,
-            Gtk.ButtonsType.OK, err)
+            parent=None, flags=0, message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK, text=err)
         dialog.run()
     else:
 
